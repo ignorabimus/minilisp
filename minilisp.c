@@ -616,11 +616,40 @@ static Obj *eval_list(void *root, Obj **env, Obj **list) {
     return reverse(*head);
 }
 
+static Obj *list_let_args(void *root, Obj **list) {
+	DEFINE3(head, lp, expr);
+	*head = Nil;
+	for (*lp = (*list)->car; *lp != Nil; *lp = (*lp)->cdr) {
+		*expr = (*lp)->car->cdr->car;
+		*head = cons(root, expr, head);
+	}
+	return reverse(*head);
+}
+
+static Obj *list_let_syms(void *root, Obj **list) {
+	DEFINE3(head, lp, expr);
+	*head = Nil;
+	for (*lp = (*list)->car; *lp != Nil; *lp = (*lp)->cdr) {
+		*expr = (*lp)->car->car;
+		*head = cons(root, expr, head);
+	}
+	return reverse(*head);
+}
+
+static Obj *list_let_undefs(void *root, Obj **list) {
+	DEFINE4(head, lp, expr, result);
+	*head = Nil;
+	for (*lp = (*list)->car; *lp != Nil; *lp = (*lp)->cdr) {
+		*head = cons(root, &Nil, head);
+	}
+	return reverse(*head);
+}
+
 static bool is_list(Obj *obj) {
     return obj == Nil || obj->type == TCELL;
 }
 
-static Obj *apply_func(void *root, Obj **env, Obj **fn, Obj **args) {
+static Obj *apply_func(void *root, Obj **fn, Obj **args) {
     DEFINE3(params, newenv, body);
     *params = (*fn)->params;
     *newenv = (*fn)->env;
@@ -638,7 +667,7 @@ static Obj *apply(void *root, Obj **env, Obj **fn, Obj **args) {
     if ((*fn)->type == TFUNCTION) {
         DEFINE1(eargs);
         *eargs = eval_list(root, env, args);
-        return apply_func(root, env, fn, eargs);
+        return apply_func(root, fn, eargs);
     }
     error("not supported");
 }
@@ -665,7 +694,7 @@ static Obj *macroexpand(void *root, Obj **env, Obj **obj) {
         return *obj;
     *macro = (*bind)->cdr;
     *args = (*obj)->cdr;
-    return apply_func(root, env, macro, args);
+    return apply_func(root, macro, args);
 }
 
 // Evaluates the S expression.
@@ -858,15 +887,32 @@ static Obj *prim_defun(void *root, Obj **env, Obj **list) {
 }
 
 // (define <symbol> expr)
+// (define (<symbol> ...) expr ...)
 static Obj *prim_define(void *root, Obj **env, Obj **list) {
-    if (length(*list) != 2 || (*list)->car->type != TSYMBOL)
+    if (length(*list) == 2 && (*list)->car->type == TSYMBOL) {
+        DEFINE2(sym, value);
+        *sym = (*list)->car;
+        *value = (*list)->cdr->car;
+        *value = eval(root, env, value);
+        add_variable(root, env, sym, value);
+        return *value;
+    } else if (length(*list) >= 2 && (*list)->car->type == TCELL && is_list((*list)->car) && (*list)->cdr->type == TCELL) {
+        Obj *p = (*list)->car;
+        for (; p->type == TCELL; p = p->cdr)
+            if (p->car->type != TSYMBOL)
+                error("Parameter must be a symbol");
+        if (p != Nil && p->type != TSYMBOL)
+            error("Parameter must be a symbol");
+        DEFINE2(fn, sym);
+        *sym = (*list)->car->cdr;
+        *fn = (*list)->cdr;
+        *fn = make_function(root, env, TFUNCTION, sym, fn);
+        *sym = (*list)->car->car;
+        add_variable(root, env, sym, fn);
+        return *fn;
+    } else {
         error("Malformed define");
-    DEFINE2(sym, value);
-    *sym = (*list)->car;
-    *value = (*list)->cdr->car;
-    *value = eval(root, env, value);
-    add_variable(root, env, sym, value);
-    return *value;
+    }
 }
 
 // (defmacro <symbol> (<symbol> ...) expr ...)
@@ -883,6 +929,118 @@ static Obj *prim_macroexpand(void *root, Obj **env, Obj **list) {
     return macroexpand(root, env, body);
 }
 
+// (define-macro <symbol> (lambda (<symbol> ...) expr ...))
+// (define-macro (<symbol> ...) expr ...)
+static Obj *prim_definemacro(void *root, Obj **env, Obj **list) {
+    if ((*list)->car->type == TSYMBOL) {
+        DEFINE2(fn, sym);
+        *sym = (*list)->car;
+        *fn = (*list)->cdr->car->cdr;
+        *fn = handle_function(root, env, fn, TMACRO);
+        add_variable(root, env, sym, fn);
+        return *fn;
+    } else if ((*list)->car->type == TCELL && is_list((*list)->car) && (*list)->cdr->type == TCELL) {
+        Obj *p = (*list)->car;
+        for (; p->type == TCELL; p = p->cdr)
+            if (p->car->type != TSYMBOL)
+                error("Parameter must be a symbol");
+        if (p != Nil && p->type != TSYMBOL)
+            error("Parameter must be a symbol");
+        DEFINE2(fn, sym);
+        *sym = (*list)->car->cdr;
+        *fn = (*list)->cdr;
+        *fn = make_function(root, env, TMACRO, sym, fn);
+        *sym = (*list)->car->car;
+        add_variable(root, env, sym, fn);
+        return *fn;
+    } else {
+        error("Malformed macro");
+    }
+}
+
+// (set! <symbol> expr)
+static Obj *prim_set(void *root, Obj **env, Obj **list) {
+	if (length(*list) == 2 && (*list)->car->type == TSYMBOL) {
+		DEFINE2(bind, value);
+		*bind = find(env, (*list)->car);
+		if (!*bind)
+			error("Undefined symbol: %s", (*list)->car->name);
+		*value = (*list)->cdr->car;
+		return (*bind)->cdr = eval(root, env, value);
+	} else {
+		error("Malformed set!");
+	}
+}
+
+// (let ((<symbol> expr) ...) expr ...)
+static Obj *prim_let(void *root, Obj **env, Obj **list) {
+	DEFINE4(args, params, body, fn);
+	*params = list_let_syms(root, list);
+	*body = (*list)->cdr;
+	*fn = make_function(root, env, TFUNCTION, params, body);
+	*args = list_let_args(root, list);
+	return apply(root, env, fn, args);
+}
+
+// apply letast
+static Obj *apply_letast(void *root, Obj **env, Obj **params, Obj **body) {
+	if (length(*params) <= 1) {
+		DEFINE2(args, fn);
+		*args = (*params)->car->cdr->car;
+		*args = eval(root, env, args);
+		*args = cons(root, args, &Nil);
+		*params = (*params)->car->car;
+		*params = cons(root, params, &Nil);
+		*fn = make_function(root, env, TFUNCTION, params, body);
+		return apply(root, env, fn, args);
+	}
+	DEFINE3(args, newparam, newenv);
+	*args = (*params)->car->cdr->car;
+	*args = eval(root, env, args);
+	*args = cons(root, args, &Nil);
+	*newparam = (*params)->car->car;
+	*newparam = cons(root, newparam, &Nil);
+	*newenv = push_env(root, env, newparam, args);
+	*params = (*params)->cdr;
+	return apply_letast(root, newenv, params, body);
+}
+
+// (let* ((<symbol> expr) ...) expr ...)
+static Obj *prim_letast(void *root, Obj **env, Obj **list) {
+	DEFINE2(params, body);
+	*params = (*list)->car;
+	*body = (*list)->cdr;
+	return apply_letast(root, env, params, body);
+}
+
+// Evaluates all the list elements and set! their values.
+static Obj *eval_let_args(void *root, Obj **env, Obj **list) {
+	DEFINE4(head, lp, expr, result);
+	*head = Nil;
+	for (*lp = (*list)->car; *lp != Nil; *lp = (*lp)->cdr) {
+		*expr = (*lp)->car->cdr->car;
+		*result = eval(root, env, expr);
+		*head = cons(root, result, head);
+	}
+	*head = reverse(*head);
+	for (*lp = (*list)->car; *lp != Nil; *lp = (*lp)->cdr) {
+		find(env, (*lp)->car->car)->cdr = (*head)->car;
+		*head = (*head)->cdr;
+	}
+	return NULL;
+}
+
+// (letrec ((<symbol> expr) ...) expr ...)
+static Obj *prim_letrec(void *root, Obj **env, Obj **list) {
+	DEFINE4(newenv, args, params, body);
+	*params = list_let_syms(root, list);
+	*args = list_let_undefs(root, list);
+	*newenv = push_env(root, env, params, args);
+	eval_let_args(root, newenv, list);
+	*body = (*list)->cdr;
+	return progn(root, newenv, body);
+ }
+
 // (println expr)
 static Obj *prim_println(void *root, Obj **env, Obj **list) {
     DEFINE1(tmp);
@@ -890,6 +1048,20 @@ static Obj *prim_println(void *root, Obj **env, Obj **list) {
     print(eval(root, env, tmp));
     printf("\n");
     return Nil;
+}
+
+// (display expr)
+static Obj *prim_display(void *root, Obj **env, Obj **list) {
+    DEFINE1(tmp);
+    *tmp = (*list)->car;
+    print(eval(root, env, tmp));
+    return True;
+}
+
+// (newline)
+static Obj *prim_newline(void *root, Obj **env, Obj **list) {
+    printf("\n");
+    return True;
 }
 
 // (if expr expr expr ...)
@@ -956,11 +1128,19 @@ static void define_primitives(void *root, Obj **env) {
     add_primitive(root, env, "defun", prim_defun);
     add_primitive(root, env, "defmacro", prim_defmacro);
     add_primitive(root, env, "macroexpand", prim_macroexpand);
+	add_primitive(root, env, "define-macro", prim_definemacro);
+    add_primitive(root, env, "macro-expand", prim_macroexpand);
     add_primitive(root, env, "lambda", prim_lambda);
+    add_primitive(root, env, "set!", prim_set);
+    add_primitive(root, env, "let", prim_let);
+    add_primitive(root, env, "let*", prim_letast);
+    add_primitive(root, env, "letrec", prim_letrec);
     add_primitive(root, env, "if", prim_if);
     add_primitive(root, env, "=", prim_num_eq);
     add_primitive(root, env, "eq", prim_eq);
     add_primitive(root, env, "println", prim_println);
+    add_primitive(root, env, "display", prim_display);
+    add_primitive(root, env, "newline", prim_newline);
 }
 
 //======================================================================
