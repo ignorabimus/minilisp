@@ -392,11 +392,12 @@ static Obj *acons(void *root, Obj **x, Obj **y, Obj **a) {
 #define SYMBOL_MAX_LEN 200
 const char symbol_chars[] = "~!@#$%^&*-_=+:/?<>";
 
+FILE *fp;
 static Obj *read_expr(void *root);
 
 static int peek(void) {
-    int c = getchar();
-    ungetc(c, stdin);
+    int c = fgetc(fp);
+    ungetc(c, fp);
     return c;
 }
 
@@ -415,12 +416,12 @@ static Obj *reverse(Obj *p) {
 // Skips the input until newline is found. Newline is one of \r, \r\n or \n.
 static void skip_line(void) {
     for (;;) {
-        int c = getchar();
+        int c = fgetc(fp);
         if (c == EOF || c == '\n')
             return;
         if (c == '\r') {
             if (peek() == '\n')
-                getchar();
+                fgetc(fp);
             return;
         }
     }
@@ -472,7 +473,7 @@ static Obj *read_quote(void *root) {
 
 static int read_number(int val) {
     while (isdigit(peek()))
-        val = val * 10 + (getchar() - '0');
+        val = val * 10 + (fgetc(fp) - '0');
     return val;
 }
 
@@ -483,7 +484,7 @@ static Obj *read_symbol(void *root, char c) {
     while (isalnum(peek()) || strchr(symbol_chars, peek())) {
         if (SYMBOL_MAX_LEN <= len)
             error("Symbol name too long");
-        buf[len++] = getchar();
+        buf[len++] = fgetc(fp);
     }
     buf[len] = '\0';
     return intern(root, buf);
@@ -491,7 +492,7 @@ static Obj *read_symbol(void *root, char c) {
 
 static Obj *read_expr(void *root) {
     for (;;) {
-        int c = getchar();
+        int c = fgetc(fp);
         if (c == ' ' || c == '\n' || c == '\r' || c == '\t')
             continue;
         if (c == EOF)
@@ -987,6 +988,12 @@ int main(int argc, char **argv) {
     *env = make_env(root, &Nil, &Nil);
     define_constants(root, env);
     define_primitives(root, env);
+
+    if (argc >= 2) {
+        fp = fopen(argv[1], "rb");
+    } else {
+        fp = stdin;
+    }
 
     // The main loop
     for (;;) {
