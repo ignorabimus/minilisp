@@ -1,5 +1,12 @@
 // This software is in the public domain.
 
+#ifdef _WIN32
+#define _CRT_SECURE_NO_DEPRECATE
+#define __attribute(x)
+#define inline __inline
+#define snprintf _snprintf
+#endif
+
 #include <assert.h>
 #include <ctype.h>
 #include <stdarg.h>
@@ -9,7 +16,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/mman.h>
 
 static __attribute((noreturn)) void error(char *fmt, ...) {
     va_list ap;
@@ -105,6 +111,8 @@ static Obj *Symbols;
 
 // The size of the heap in byte
 #define MEMORY_SIZE 65536
+static char (*g_memory)[MEMORY_SIZE];
+static int g_block;
 
 // The pointer pointing to the beginning of the current heap
 static void *memory;
@@ -211,7 +219,7 @@ static Obj *alloc(void *root, int type, size_t size) {
         error("Memory exhausted");
 
     // Allocate the object.
-    Obj *obj = memory + mem_nused;
+    Obj *obj = (Obj *)((char *)memory + mem_nused);
     obj->type = type;
     obj->size = size;
     mem_nused += size;
@@ -257,7 +265,7 @@ static inline Obj *forward(Obj *obj) {
 }
 
 static void *alloc_semispace() {
-    return mmap(NULL, MEMORY_SIZE, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);
+    return g_memory[g_block = (g_block + 1) % 2];
 }
 
 // Copies the root objects.
@@ -316,11 +324,10 @@ static void gc(void *root) {
     }
 
     // Finish up GC.
-    munmap(from_space, MEMORY_SIZE);
     size_t old_nused = mem_nused;
     mem_nused = (size_t)((uint8_t *)scan1 - (uint8_t *)memory);
     if (debug_gc)
-        fprintf(stderr, "GC: %zu bytes out of %zu bytes copied.\n", mem_nused, old_nused);
+        fprintf(stderr, "GC: %u bytes out of %u bytes copied.\n", mem_nused, old_nused);
     gc_running = false;
 }
 
@@ -771,7 +778,7 @@ static Obj *prim_while(void *root, Obj **env, Obj **list) {
 // (gensym)
 static Obj *prim_gensym(void *root, Obj **env, Obj **list) {
   static int count = 0;
-  char buf[10];
+  char buf[16];
   snprintf(buf, sizeof(buf), "G__%d", count++);
   return make_symbol(root, buf);
 }
@@ -971,7 +978,7 @@ int main(int argc, char **argv) {
     always_gc = getEnvFlag("MINILISP_ALWAYS_GC");
 
     // Memory allocation
-    memory = alloc_semispace();
+    memory = g_memory = malloc(MEMORY_SIZE * 2);
 
     // Constants and primitives
     Symbols = Nil;
@@ -993,4 +1000,8 @@ int main(int argc, char **argv) {
         print(eval(root, env, expr));
         printf("\n");
     }
+
+    free(g_memory);
+
+    return 0;
 }
